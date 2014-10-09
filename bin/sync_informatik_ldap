@@ -9,6 +9,7 @@ require 'awesome_print'
 require 'digest/sha1'
 require 'json'
 require 'pry'
+require 'active_support'
 require 'active_support/core_ext'
 
 class SyncInformatiktLDAP < Thor
@@ -16,20 +17,14 @@ class SyncInformatiktLDAP < Thor
   LDAP_CHECKSUM_SET = 'informatik:s_checksum_ldap_informatik'
   LDAP_UID_SET      = 'informatik:s_uid_ldap_informatik'
   UMT_CHECKSUM_SET  = 'informatik:s_checksum_umt'
-  UMT_UID_SET       = 'phsyik:s_uid_umt'
+  UMT_UID_SET       = 'informatik:s_uid_umt'
   UMT_ACCOUNT_BY_UID_HASH  = 'informatik:h_accounts_by_uid'
   UMT_ACCOUNT_BY_CHECKSUM_HASH  = 'informatik:h_accounts_by_checksum'
-
-  desc 'refresh','refresh the table'
-  def refresh
-    connect_umt
-    plsql.physik_pkg.refreshPhysikAccountsTbl;
-  end
 
   desc 'new','add all missing accounts to the ldap'
   def new
     cleanup_redis_db
-    fetch_umt
+    fetch_idm
     fetch_ldap
 
     counter = 0
@@ -38,17 +33,19 @@ class SyncInformatiktLDAP < Thor
       puts "#{counter}: #{uid}"
       write_new_entry uid
     end
+
+    puts "Es wurden #{counter} viele Eintraege neu geschrieben"
   end
 
   desc "update","update ldap accounts"
   def update
     cleanup_redis_db
-    fetch_umt
+    fetch_idm
     fetch_ldap
 
     unless 0 == missing_entries.size
       puts "[ERROR] there are missing entries left."
-      puts "[ERROR] run 'sync_physik_ldap new' first"
+      puts "[ERROR] run 'sync_informatik_ldap new' first"
       exit
     end
 
@@ -57,7 +54,7 @@ class SyncInformatiktLDAP < Thor
       write_update_entry checksum
       counter += 1
     end
-    puts "#{counter} Eintraege aktualisiert"
+    puts "Es wurden #{counter} Eintraege aktualisiert"
   end
 
 private
@@ -65,7 +62,7 @@ private
     @redis ||= Redis.new
   end
 
-  def connect_umt
+  def connect_idm
     plsql.connection = OCI8.new(
       ENV.fetch('UMT_USER'),
       ENV.fetch('UMT_PASSWORD'),
@@ -75,10 +72,10 @@ private
   def connect_ldap
     unless @ldap
       @ldap = Net::LDAP.new
-      @ldap.host = ENV.fetch('LDAP2_ITZ_HOST')
-      @ldap.port = ENV.fetch('LDAP2_ITZ_PORT')
+      @ldap.host = ENV.fetch('LDAP1_ITZ_HOST')
+      @ldap.port = ENV.fetch('LDAP1_ITZ_PORT')
       @ldap.encryption :simple_tls
-      @ldap.auth ENV.fetch('LDAP2_ITZ_USER'), ENV.fetch('LDAP2_ITZ_PASSWORD')
+      @ldap.auth ENV.fetch('LDAP1_ITZ_USER'), ENV.fetch('LDAP1_ITZ_PASSWORD')
     end
   end
 
@@ -92,22 +89,25 @@ private
     @redis.del UMT_ACCOUNT_BY_UID_HASH
   end
 
-  def fetch_umt
-    connect_umt
+  def fetch_idm
+    connect_idm
     connect_redis
 
     records = nil
-    plsql.physik_pkg.getAccounts { |cursor| records = cursor.fetch_all }
+    plsql.informatik_pkg.accountList { |cursor| records = cursor.fetch_all }
 
+    counter = 0
     records.each do |record|
-      checksum = build_checksum(record[1] + record[0] + record[3])
+      counter = counter + 1
+      checksum = build_checksum(record[1] + record[2])
 
       entry = {
-        sname:     record[0],
-        gname:     record[1],
-        nkz:       record[2],
-        mail:      record[3],
-        uidNumber: record[4],
+        uid:       record[0],
+        firstname: record[1],
+        lastname:  record[2],
+        uidNumber: record[3],
+        password:  record[4],
+        gidNumber: record[5],
         checksum:  checksum}
 
       @redis.hmset(
@@ -117,13 +117,13 @@ private
 
       @redis.hmset(
         UMT_ACCOUNT_BY_UID_HASH,
-        entry[:nkz],
+        entry[:uid],
         entry.to_json)
 
       @redis.sadd UMT_CHECKSUM_SET, checksum
-      @redis.sadd UMT_UID_SET, entry[:nkz]
+      @redis.sadd UMT_UID_SET, entry[:uid]
     end
-
+    puts "Es wurden #{counter} Eintraege aus dem IDM eingelesen."
   end
 
   def fetch_ldap
@@ -131,16 +131,18 @@ private
     connect_redis
 
     filter = Net::LDAP::Filter.eq 'uid','*'
-    basedn = 'ou=user,ou=physik,o=mlu,c=de'
+    basedn = 'ou=users,ou=informatik,o=mlu,c=de'
     attr = ['carLicense','uid']
 
-
+    counter = 0
     @ldap.search(base: basedn, filter: filter, attributes: attr) do |entry|
+      counter = counter + 1
       unless entry[:carLicense].empty?
         @redis.sadd LDAP_CHECKSUM_SET,entry[:carLicense][0]
       end
       @redis.sadd LDAP_UID_SET,entry[:uid][0]
     end
+    puts "Es wurden #{counter} Eintraege aus dem LDAP eingelesen."
   end
 
   def write_new_entry uid
@@ -150,23 +152,23 @@ private
       @redis.hget UMT_ACCOUNT_BY_UID_HASH, uid).
       symbolize_keys
 
-    dn = "uid=#{entry[:nkz]},ou=user,ou=physik,o=mlu,c=de"
+    dn = "uid=#{entry[:uid]},ou=users,ou=informatik,o=mlu,c=de"
     attributes = {
-      uid: entry[:nkz],
-      sn: entry[:sname],
-      givenname: entry[:gname],
-      cn: "#{entry[:gname]} #{entry[:sname]}",
-      homedirectory: "/home/#{entry[:nkz]}",
+      uid: entry[:uid],
+      sn: entry[:lastname],
+      givenname: entry[:firstname],
+      cn: "#{entry[:firstname]} #{entry[:lastname]}",
+      homedirectory: "/home/#{entry[:uid]}",
       uidnumber: "#{entry[:uidNumber]}",
-      gidnumber: "10001",
-      shadowlastchange: "0",
-      shadowmax: "3650",
-      shadowmin: "0",
+      gidnumber: "#{entry[:gidNumber]}",
       carlicense: "#{entry[:checksum]}",
       loginshell: "/bin/false",
-      userpassword: Net::LDAP::Password.generate(:sha, 'secret00'),
-      objectClass: ["top","inetOrgPerson","posixAccount","shadowAccount"]}
+      userpassword: Net::LDAP::Password.generate(:sha, "#{entry[:password]}"),
+      objectClass: ["top","inetOrgPerson","posixAccount"]}
 
+    # puts dn
+    # ap attributes
+    # puts ''
     unless @ldap.add dn: dn, attributes: attributes
       puts "Result: #{@ldap.get_operation_result.code}"
       puts "Message: #{@ldap.get_operation_result.message}"
@@ -182,12 +184,11 @@ private
   def write_update_entry checksum
     entry = get_account_by_checksum checksum
 
-    dn = "uid=#{entry[:nkz]},ou=user,ou=physik,o=mlu,c=de"
+    dn = "uid=#{entry[:uid]},ou=users,ou=informatik,o=mlu,c=de"
 
     operations = [
       [:replace, :givenname, entry[:gname]],
       [:replace, :sn, entry[:sname]],
-      [:replace, :mail, entry[:mail]],
       [:replace, :carlicense, entry[:checksum]]]
 
     unless @ldap.modify dn: dn, operations: operations
