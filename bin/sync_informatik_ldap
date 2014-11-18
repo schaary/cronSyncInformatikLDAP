@@ -105,9 +105,9 @@ private
 
   def connect_mysql
     @mysql ||= Mysql2::Client.new \
-      host: 'mysql.itz.uni-halle.de',
-      username: 'root',
-      password: 'aiaJe7e6MHscqkwOfpyUuIwILTqqYKbH',
+      host: ENV['MYSQL_ITZ_HOST'],
+      username: ENV['MYSQL_ITZ_USERNAME'],
+      password: ENV['MYSQL_ITZ_PASSWORD'],
       port: 3306,
       database: 'a6abz_sp_production_20141023'
 
