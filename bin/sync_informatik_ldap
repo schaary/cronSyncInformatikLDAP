@@ -8,9 +8,11 @@ require 'net-ldap'
 require 'awesome_print'
 require 'digest/sha1'
 require 'json'
-require 'pry'
+#require 'pry'
 require 'active_support'
 require 'active_support/core_ext'
+require 'mysql2'
+require 'base64'
 
 class SyncInformatiktLDAP < Thor
 
@@ -20,6 +22,18 @@ class SyncInformatiktLDAP < Thor
   UMT_UID_SET       = 'informatik:s_uid_umt'
   UMT_ACCOUNT_BY_UID_HASH  = 'informatik:h_accounts_by_uid'
   UMT_ACCOUNT_BY_CHECKSUM_HASH  = 'informatik:h_accounts_by_checksum'
+
+  desc 'refresh','refresh the table'
+  def refresh
+    connect_idm
+    plsql.informatik_pkg.refreshInformatikAccountsTbl
+  end
+
+  # desc 'mysql_test','test connection to mysql server'
+  # def mysql_test
+  #   puts count_sp_passwords 'nmaef'
+  #   puts "{SSHA}#{Base64.encode64(fetch_sp_password 'nmaef')}"
+  # end
 
   desc 'new','add all missing accounts to the ldap'
   def new
@@ -87,6 +101,17 @@ private
     @redis.del UMT_UID_SET
     @redis.del UMT_ACCOUNT_BY_CHECKSUM_HASH
     @redis.del UMT_ACCOUNT_BY_UID_HASH
+  end
+
+  def connect_mysql
+    @mysql ||= Mysql2::Client.new \
+      host: 'mysql.itz.uni-halle.de',
+      username: 'root',
+      password: 'aiaJe7e6MHscqkwOfpyUuIwILTqqYKbH',
+      port: 3306,
+      database: 'a6abz_sp_production_20141023'
+
+    @mysql.query_options.merge!(:symbolize_keys => true)
   end
 
   def fetch_idm
@@ -207,6 +232,34 @@ private
 
   def build_checksum string
     Digest::SHA1.hexdigest string
+  end
+
+  def count_sp_passwords uid
+    connect_mysql
+
+    cursor = @mysql.query \
+      "select count(*) counter " +
+        "from users u " +
+       "inner join histories h " +
+          "on u.id = h.user_id " +
+       "where u.uid = '#{uid}'"
+
+    cursor.first[:counter]
+  end
+
+  def fetch_sp_password uid
+    connect_mysql
+
+    cursor = @mysql.query \
+      "select distinct h.password_hash " +
+        "from users u " +
+       "inner join histories h " +
+          "on u.id = h.user_id " +
+       "where u.uid = '#{uid}' " +
+       "order by h.created_at desc " +
+       "limit 1"
+
+    cursor.first[:password_hash]
   end
 end
 
