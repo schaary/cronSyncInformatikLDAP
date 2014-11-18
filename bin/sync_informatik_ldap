@@ -212,8 +212,8 @@ private
     dn = "uid=#{entry[:uid]},ou=users,ou=informatik,o=mlu,c=de"
 
     operations = [
-      [:replace, :givenname, entry[:gname]],
-      [:replace, :sn, entry[:sname]],
+      [:replace, :givenname, entry[:firstname]],
+      [:replace, :sn, entry[:lastname]],
       [:replace, :carlicense, entry[:checksum]]]
 
     unless @ldap.modify dn: dn, operations: operations
